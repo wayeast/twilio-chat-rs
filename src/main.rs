@@ -1,41 +1,36 @@
+#[allow(clippy::all)]
 mod texttospeech_v1_types;
 mod twilio_types;
 
 use crate::twilio_types::*;
 
 use axum::{
-    body::StreamBody,
     extract::{
-        connect_info::ConnectInfo,
-        ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade},
-        Host, Path, State,
+        ws::{Message, WebSocket, WebSocketUpgrade},
+        Host, State,
     },
     http::{header, HeaderMap},
     response::IntoResponse,
     routing::{get, post},
     Router,
 };
-use base64::{alphabet, engine, read, write, Engine};
+use base64::{engine, read, Engine};
 use futures_util::{
     sink::SinkExt,
-    stream::{self, SplitSink, SplitStream, Stream, StreamExt},
+    stream::{SplitSink, SplitStream, StreamExt},
 };
 use gcs_common::yup_oauth2;
 use std::env;
 use std::io::{Cursor, Read};
-use std::net::SocketAddr;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use texttospeech_v1_types::{
     AudioConfig, AudioConfigAudioEncoding, SynthesisInput, SynthesizeSpeechRequest, TextService,
     TextSynthesizeParams, VoiceSelectionParams, VoiceSelectionParamsSsmlGender,
 };
-use tokio::fs::File;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::sync::oneshot;
 use tokio::time::sleep;
-use tokio_util::io::ReaderStream;
 
 async fn ws_handler(
     ws: WebSocketUpgrade,
@@ -44,15 +39,20 @@ async fn ws_handler(
     ws.on_upgrade(move |socket| socket_handler(socket, app_state))
 }
 
-async fn socket_handler(mut socket: WebSocket, app_state: Arc<AppState>) {
-    let (mut sender, mut receiver) = socket.split();
+async fn socket_handler(socket: WebSocket, app_state: Arc<AppState>) {
+    let (sender, receiver) = socket.split();
     let (sid_sink, sid_src) = oneshot::channel();
 
-    let receive_task = tokio::spawn(hear_stuff(receiver, sid_sink));
-    let send_task = tokio::spawn(say_something(sender, sid_src, app_state));
+    let _res = tokio::try_join!(
+        hear_stuff(receiver, sid_sink),
+        say_something(sender, sid_src, app_state)
+    );
 }
 
-async fn hear_stuff(mut receiver: SplitStream<WebSocket>, sid_sink: oneshot::Sender<String>) {
+async fn hear_stuff(
+    mut receiver: SplitStream<WebSocket>,
+    sid_sink: oneshot::Sender<String>,
+) -> Result<(), ()> {
     let mut stream_sid = String::new();
     while let Some(msg) = receiver.next().await {
         match msg {
@@ -99,11 +99,7 @@ async fn hear_stuff(mut receiver: SplitStream<WebSocket>, sid_sink: oneshot::Sen
             Ok(Message::Text(json)) => {
                 match serde_json::from_str(&json) {
                     Ok(message) => match message {
-                        TwilioMessage::Media {
-                            sequence_number,
-                            stream_sid,
-                            ..
-                        } => {
+                        TwilioMessage::Media { .. } => {
                             // println!("Got media message {sequence_number} for {stream_sid}");
                         }
                         TwilioMessage::Stop {
@@ -129,90 +125,54 @@ async fn hear_stuff(mut receiver: SplitStream<WebSocket>, sid_sink: oneshot::Sen
             }
         }
     }
+
+    Ok(())
 }
 
 async fn say_something(
     mut sender: SplitSink<WebSocket, Message>,
     sid_src: oneshot::Receiver<String>,
     app_state: Arc<AppState>,
-) {
+) -> Result<(), ()> {
+    // Get stream sid from incoming ws channel
     let res = sid_src.await;
     if res.is_err() {
         println!("sid_sink dropped");
-        return;
+        return Ok(());
     }
     let stream_sid = res.unwrap();
     println!("say_something got stream sid {stream_sid}");
 
     sleep(Duration::from_secs(1)).await;
 
-    // let params = TextSynthesizeParams::default();
-    // // Rust code that does and returns the equivalent of the steps at
-    // // https://cloud.google.com/text-to-speech/docs/create-audio-text-command-line#synthesize_audio_from_text
-    // let audio_config = AudioConfig {
-    //     audio_encoding: Some(AudioConfigAudioEncoding::MULAW),
-    //     sample_rate_hertz: Some(8_000),
-    //     ..Default::default()
-    // };
-    // let input = SynthesisInput {
-    //     text: Some(TEST.to_string()),
-    //     ..Default::default()
-    // };
-    // let voice = VoiceSelectionParams {
-    //     language_code: Some("en-US".to_string()),
-    //     name: Some("en-US-Standard-E".to_string()),
-    //     ssml_gender: Some(VoiceSelectionParamsSsmlGender::FEMALE),
-    //     ..Default::default()
-    // };
-    // let speech_request = SynthesizeSpeechRequest {
-    //     audio_config: Some(audio_config),
-    //     input: Some(input),
-    //     voice: Some(voice),
-    // };
-    // let synthesize_response = app_state
-    //     .gcs_client
-    //     .synthesize(&params, &speech_request)
-    //     .await
-    //     .unwrap();
-    // let payload = synthesize_response.audio_content.unwrap();
-    // // `payload` is the base64-encoded mulaw/8000 bytes plus a `wav` header
-    // let mut file =
-    //     tokio::fs::File::create("/home/huston/Workspace/experimental/twilio-rs/dev/payload.txt")
-    //         .await
-    //         .unwrap();
-    // file.write_all(payload.as_bytes()).await.unwrap();
-    // // base64-decode `payload`
-    // let mut enc = Cursor::new(payload);
-    // let mut decoder = read::DecoderReader::new(&mut enc, &engine::general_purpose::STANDARD);
-    // let mut body = Vec::new();
-    // decoder.read_to_end(&mut body).unwrap();
-    // // `body` is now raw u8's; if written to a file on disk, `ffprobe` and `soxi` recognize it as
-    // // mulaw/8000 audio; `play` can play it.
-    // let mut file =
-    //     tokio::fs::File::create("/home/huston/Workspace/experimental/twilio-rs/dev/payload.wav")
-    //         .await
-    //         .unwrap();
-    // file.write_all(&body[..]).await.unwrap();
-    // // let wavreader = hound::WavReader::new(&body[..]).expect("Unable to open decoded synthesized payload as wav");
-    // // let spec = wavreader.spec();
-    // // println!("wav spec: {:?}", spec);
-    // // let s = std::str::from_utf8(&body[0..4]).expect("Error converting wav header to string");
-    // // println!("header piece: '{s}'");
-    // // Trim `wav` header from Google's response
-    // let trimmed = &body[44..];
-    // // `trimmed` is headerless mulaw/8000 audio; if written to a disk, it can be imported into
-    // // Audacity as mulaw-encoded, 8000Hz audio and played.
-    // let mut file =
-    //     tokio::fs::File::create("/home/huston/Workspace/experimental/twilio-rs/dev/payload-headerless.dat")
-    //         .await
-    //         .unwrap();
-    // file.write_all(trimmed).await.unwrap();
-
-    let mut file = tokio::fs::File::open("/home/huston/Workspace/experimental/twilio-rs/dev/standard.dat").await.unwrap();
-    let mut trimmed = vec![];
-    file.read_to_end(&mut trimmed).await.unwrap();
+    // Get tts bytes from Google
+    let text = r#"Hello. You are hearing this
+    from a Twilio websocket connection. These
+    bytes are mulaw encoded."#;
+    let payload = app_state
+        .get_google_tts(text, AudioConfigAudioEncoding::LINEAR16)
+        .await;
+    // Decode payload string
+    let mut body = Vec::new();
+    b64_decode_to_buf(payload, &mut body);
+    let mut file = tokio::fs::File::create("dev/lin16.wav").await.unwrap();
+    file.write_all(&body[..]).await.unwrap();
+    // Clip wav header
+    let trimmed = body[44..].to_vec();
+    let mut file = tokio::fs::File::create("dev/lin16.dat").await.unwrap();
+    file.write_all(&trimmed[..]).await.unwrap();
+    // Transcode to mulaw
+    let mut converted = vec![];
+    for sample in trimmed
+        .chunks_exact(2)
+        .map(|a| i16::from_ne_bytes([a[0], a[1]]))
+    {
+        converted.push(linear_to_ulaw(sample));
+    }
+    let mut file = tokio::fs::File::create("dev/ulaw.dat").await.unwrap();
+    file.write_all(&converted[..]).await.unwrap();
     // base64-encode the trimmed raw audio
-    let re_encoded: String = engine::general_purpose::STANDARD.encode(trimmed);
+    let re_encoded: String = engine::general_purpose::STANDARD.encode(converted);
     // Construct a Media message to send to Twilio.
     let outbound_media_meta = OutboundMediaMeta {
         payload: re_encoded,
@@ -222,69 +182,49 @@ async fn say_something(
         stream_sid: stream_sid.clone(),
     };
     let json = serde_json::to_string(&outbound_media).unwrap();
-    println!("{json}");
-    // let mut file =
-    //     tokio::fs::File::create("/home/huston/Workspace/experimental/twilio-rs/dev/payload-headerless.txt")
-    //         .await
-    //         .unwrap();
-    // file.write_all(json.as_bytes()).await.unwrap();
-    // We can verify that the json content is of the right format for a Media message to be
-    // consumed by Twilio.
-    let message = Message::Text(json);
 
+    let message = Message::Text(json);
     sender.send(message).await.unwrap();
 
-    // let outbound_mark_meta = OutboundMarkMeta {
-    //     name: "wtf".to_string(),
-    // };
-    // let outbound_mark = TwilioOutbound::Mark {
-    //     mark: outbound_mark_meta,
-    //     stream_sid,
-    // };
-    // let json = serde_json::to_string(&outbound_mark).unwrap();
-    // println!("{json}");
-    // let message = Message::Text(json);
-
-    // sender.send(message).await.unwrap();
+    Ok(())
 }
 
-const TEST: &str = r#"Now is the winter of our discontent
-Made glorious summer by this sun of York.
-Some are born great, some achieve greatness
-And some have greatness thrust upon them.
-Friends, Romans, countrymen - lend me your ears!
-"#;
+fn linear_to_ulaw(sample: i16) -> u8 {
+    let mut pcm_value = sample;
+    let sign = (pcm_value >> 8) & 0x80;
+    if sign != 0 && pcm_value.checked_mul(-1).is_some() {
+        pcm_value *= -1;
+    }
+    if pcm_value > 32635 {
+        pcm_value = 32635;
+    }
+    pcm_value += 0x84;
+    let mut exponent: i16 = 7;
+    let mut mask = 0x4000;
+    while pcm_value & mask == 0 {
+        exponent -= 1;
+        mask >>= 1;
+    }
+    let manitssa: i16 = (pcm_value >> (exponent + 3)) & 0x0f;
+    let ulaw_value = sign | exponent << 4 | manitssa;
+    (!ulaw_value) as u8
+}
+
+fn b64_decode_to_buf(enc: String, buf: &mut Vec<u8>) {
+    let mut cur = Cursor::new(enc);
+    let mut decoder = read::DecoderReader::new(&mut cur, &engine::general_purpose::STANDARD);
+    decoder.read_to_end(buf).unwrap();
+}
 
 async fn play_handler(State(app_state): State<Arc<AppState>>) -> impl IntoResponse {
-    let params = TextSynthesizeParams::default();
-    let audio_config = AudioConfig {
-        audio_encoding: Some(AudioConfigAudioEncoding::MP3),
-        ..Default::default()
-    };
-    let input = SynthesisInput {
-        text: Some(TEST.to_string()),
-        ..Default::default()
-    };
-    let voice = VoiceSelectionParams {
-        language_code: Some("en-US".to_string()),
-        name: Some("en-US-Standard-E".to_string()),
-        ssml_gender: Some(VoiceSelectionParamsSsmlGender::FEMALE),
-        ..Default::default()
-    };
-    let speech_request = SynthesizeSpeechRequest {
-        audio_config: Some(audio_config),
-        input: Some(input),
-        voice: Some(voice),
-    };
-    let synthesize_response = app_state
-        .gcs_client
-        .synthesize(&params, &speech_request)
-        .await
-        .unwrap();
-    let mut enc = Cursor::new(synthesize_response.audio_content.unwrap());
-    let mut decoder = read::DecoderReader::new(&mut enc, &engine::general_purpose::STANDARD);
+    let text = r#"Hello. You are hearing this
+    from a Twilio Play verb. These bytes are
+    MP3 encoded."#;
+    let tts = app_state
+        .get_google_tts(text, AudioConfigAudioEncoding::MP3)
+        .await;
     let mut body = Vec::new();
-    decoder.read_to_end(&mut body).unwrap();
+    b64_decode_to_buf(tts, &mut body);
 
     let mut headers = HeaderMap::new();
     headers.insert(header::CONTENT_TYPE, "audio/mpeg".parse().unwrap());
@@ -292,6 +232,7 @@ async fn play_handler(State(app_state): State<Arc<AppState>>) -> impl IntoRespon
     (headers, body)
 }
 
+#[allow(dead_code)]
 async fn twiml_start_connect(Host(host): Host) -> impl IntoResponse {
     let say_action = SayAction {
         text: "Hi. I'm your Twilio host. Welcome!".to_string(),
@@ -321,6 +262,7 @@ async fn twiml_start_connect(Host(host): Host) -> impl IntoResponse {
     (headers, twiml)
 }
 
+#[allow(dead_code)]
 async fn twiml_start_play(Host(host): Host) -> impl IntoResponse {
     let url = format!("https://{}/play", host);
     let play_action = PlayAction {
@@ -339,8 +281,40 @@ async fn twiml_start_play(Host(host): Host) -> impl IntoResponse {
 }
 
 struct AppState {
-    base_file_dir: PathBuf,
     gcs_client: TextService,
+}
+
+impl AppState {
+    async fn get_google_tts(&self, text: &str, encoding: AudioConfigAudioEncoding) -> String {
+        let params = TextSynthesizeParams::default();
+        let audio_config = AudioConfig {
+            audio_encoding: Some(encoding),
+            sample_rate_hertz: Some(8_000),
+            ..Default::default()
+        };
+        let input = SynthesisInput {
+            text: Some(text.to_string()),
+            ..Default::default()
+        };
+        let voice = VoiceSelectionParams {
+            language_code: Some("en-US".to_string()),
+            name: Some("en-US-Standard-E".to_string()),
+            ssml_gender: Some(VoiceSelectionParamsSsmlGender::FEMALE),
+            ..Default::default()
+        };
+        let speech_request = SynthesizeSpeechRequest {
+            audio_config: Some(audio_config),
+            input: Some(input),
+            voice: Some(voice),
+        };
+        let synthesize_response = self
+            .gcs_client
+            .synthesize(&params, &speech_request)
+            .await
+            .unwrap();
+
+        synthesize_response.audio_content.unwrap()
+    }
 }
 
 async fn gcs_client() -> TextService {
@@ -367,15 +341,10 @@ async fn gcs_client() -> TextService {
 #[tokio::main]
 async fn main() {
     dotenvy::dotenv().unwrap();
-    let base_file_dir = env::var("BASE_FILE_DIR").expect("No BASE_FILE_DIR set in env.");
-    let base_file_dir = PathBuf::from(base_file_dir);
 
     let gcs_client = gcs_client().await;
 
-    let app_state = Arc::new(AppState {
-        base_file_dir,
-        gcs_client,
-    });
+    let app_state = Arc::new(AppState { gcs_client });
 
     let app = Router::new()
         .route("/connect", get(ws_handler))
