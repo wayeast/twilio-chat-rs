@@ -24,14 +24,13 @@ use gcs_common::yup_oauth2;
 use std::env;
 use std::io::{Cursor, Read};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::Instant;
 use texttospeech_v1_types::{
     AudioConfig, AudioConfigAudioEncoding, SynthesisInput, SynthesizeSpeechRequest, TextService,
     TextSynthesizeParams, VoiceSelectionParams, VoiceSelectionParamsSsmlGender,
 };
 use tokio::net::TcpStream;
 use tokio::sync::oneshot;
-use tokio::time::sleep;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
@@ -39,14 +38,17 @@ async fn ws_handler(
     ws: WebSocketUpgrade,
     State(app_state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
+    println!("ws handler!!!");
     ws.on_upgrade(move |socket| socket_handler(socket, app_state))
 }
 
 async fn socket_handler(socket: WebSocket, app_state: Arc<AppState>) {
+    println!("created websocket; splitting streams");
     let (sender, receiver) = socket.split();
     let (sid_sink, sid_src) = oneshot::channel();
 
     // connect to Deepgram
+    println!("Connecting to DG");
     let uri = "wss://api.deepgram.com/v1/listen?encoding=mulaw&sample_rate=8000";
     let mut rq = uri.into_client_request().unwrap();
     rq.headers_mut()
@@ -59,6 +61,7 @@ async fn socket_handler(socket: WebSocket, app_state: Arc<AppState>) {
     let (ws_stream, _) = connect_async(rq).await.unwrap();
     let (dg_sender, dg_receiver) = ws_stream.split();
 
+    println!("handling ws streams");
     let _res = tokio::try_join!(
         hear_stuff(receiver, sid_sink, dg_sender),
         say_something(sender, sid_src, dg_receiver, app_state)
@@ -173,6 +176,9 @@ async fn say_something(
     let stream_sid = res.unwrap();
     println!("say_something got stream sid {stream_sid}");
 
+    const POLITENESS_DELAY_MILLIS: u128 = 2_000;
+    let mut last_talking = Instant::now();
+    let mut stuff_buff = String::new();
     while let Some(Ok(msg)) = dg_receiver.next().await {
         match msg {
             tokio_tungstenite::tungstenite::Message::Text(msg) => {
@@ -180,33 +186,63 @@ async fn say_something(
                     serde_json::from_str::<deepgram_types::StreamingResponse>(&msg).unwrap();
                 let transcript = &streaming_response.channel.alternatives[0].transcript;
                 if !transcript.is_empty() {
-                    sleep(Duration::from_secs(3)).await;
-                    let payload = app_state
-                        .get_google_tts(transcript, AudioConfigAudioEncoding::LINEAR16)
-                        .await;
-                    let mut body = Vec::new();
-                    b64_decode_to_buf(payload, &mut body);
-                    let trimmed = body[44..].to_vec();
-                    let mut converted = vec![];
-                    for sample in trimmed
-                        .chunks_exact(2)
-                        .map(|a| i16::from_ne_bytes([a[0], a[1]]))
-                    {
-                        converted.push(linear_to_ulaw(sample));
-                    }
-                    let re_encoded: String = engine::general_purpose::STANDARD.encode(converted);
-                    let outbound_media_meta = OutboundMediaMeta {
-                        payload: re_encoded,
-                    };
-                    let outbound_media = TwilioOutbound::Media {
-                        media: outbound_media_meta,
+                    // caller is talking; let's send a clear message to twilio.  we probably want
+                    // to keep better track of whether or not there is anything in twilio's buffer,
+                    // but as a first pass, let's try this brutish strategy
+                    let outbound_clear = TwilioOutbound::Clear {
                         stream_sid: stream_sid.clone(),
                     };
-                    let json = serde_json::to_string(&outbound_media).unwrap();
+                    let json = serde_json::to_string(&outbound_clear).unwrap();
                     let message = Message::Text(json.clone());
                     sender.send(message).await.unwrap();
                 }
-                println!("DG says: {msg}");
+                if (!transcript.is_empty() && !stuff_buff.is_empty())
+                    || (!transcript.is_empty() && stuff_buff.is_empty())
+                {
+                    // caller has either been talking and continues to talk, or has just started talking;
+                    // just append transcript to stuff_buff
+                    stuff_buff.push(' ');
+                    stuff_buff.push_str(transcript);
+                    last_talking = Instant::now();
+                } else if transcript.is_empty() && !stuff_buff.is_empty() {
+                    // caller has been talking but stopped; if, politeness delay has transpired,
+                    // try to respond.
+                    let since_last_talking = last_talking.elapsed().as_millis();
+                    if since_last_talking > POLITENESS_DELAY_MILLIS {
+                        println!("sending transcript to googs: '{stuff_buff}'");
+                        let payload = app_state
+                            .get_google_tts(&stuff_buff, AudioConfigAudioEncoding::LINEAR16)
+                            .await;
+                        stuff_buff.clear();
+                        let mut body = Vec::new();
+                        b64_decode_to_buf(payload, &mut body);
+                        let trimmed = body[44..].to_vec();
+                        let mut converted = vec![];
+                        for sample in trimmed
+                            .chunks_exact(2)
+                            .map(|a| i16::from_ne_bytes([a[0], a[1]]))
+                        {
+                            converted.push(linear_to_ulaw(sample));
+                        }
+                        let re_encoded: String =
+                            engine::general_purpose::STANDARD.encode(converted);
+                        let outbound_media_meta = OutboundMediaMeta {
+                            payload: re_encoded,
+                        };
+                        let outbound_media = TwilioOutbound::Media {
+                            media: outbound_media_meta,
+                            stream_sid: stream_sid.clone(),
+                        };
+                        let json = serde_json::to_string(&outbound_media).unwrap();
+                        let message = Message::Text(json.clone());
+                        sender.send(message).await.unwrap();
+                    } else {
+                        // we've detected the caller stopped talking, but not enough time has
+                        // elapsed for us to cut in (politely)
+                    }
+                } else {
+                    // nothing has been said, and nothing is being said; ignore
+                }
             }
             _ => println!("Got unsupported message type from Deepgram."),
         }
