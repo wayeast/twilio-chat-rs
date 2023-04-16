@@ -1,5 +1,8 @@
 ## Chat project
-In which we get Twilio to play Google TTS to a caller.
+In which we play back to the caller their words that Deepgram
+hears.
 
-Here, we can use either the Twiml Play verb or send encoded audio
-via a Twilio stream in Media messages.
+This does nothing fancy -- only adds Deepgram to the mix.  Here,
+we open a websocket stream to Deepgram; for every streaming response
+we get, we wait for three seconds, then send the transcript to Google
+for TTS, and send the resulting TTS to Twilio.

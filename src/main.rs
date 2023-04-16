@@ -1,3 +1,4 @@
+mod deepgram_types;
 #[allow(clippy::all)]
 mod texttospeech_v1_types;
 mod twilio_types;
@@ -28,9 +29,11 @@ use texttospeech_v1_types::{
     AudioConfig, AudioConfigAudioEncoding, SynthesisInput, SynthesizeSpeechRequest, TextService,
     TextSynthesizeParams, VoiceSelectionParams, VoiceSelectionParamsSsmlGender,
 };
-use tokio::io::AsyncWriteExt;
+use tokio::net::TcpStream;
 use tokio::sync::oneshot;
 use tokio::time::sleep;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
 async fn ws_handler(
     ws: WebSocketUpgrade,
@@ -43,16 +46,35 @@ async fn socket_handler(socket: WebSocket, app_state: Arc<AppState>) {
     let (sender, receiver) = socket.split();
     let (sid_sink, sid_src) = oneshot::channel();
 
+    // connect to Deepgram
+    let uri = "wss://api.deepgram.com/v1/listen?encoding=mulaw&sample_rate=8000";
+    let mut rq = uri.into_client_request().unwrap();
+    rq.headers_mut()
+        .entry(http::header::AUTHORIZATION)
+        .or_insert(
+            http::header::HeaderValue::from_str(&format!("Token {}", app_state.console_api_key))
+                .unwrap(),
+        );
+    // let rq = http::Request::builder().method(http::method::Method::GET).uri(uri).header("Authorization", format!("Token {}", app_state.console_api_key)).body(()).unwrap();
+    let (ws_stream, _) = connect_async(rq).await.unwrap();
+    let (dg_sender, dg_receiver) = ws_stream.split();
+
     let _res = tokio::try_join!(
-        hear_stuff(receiver, sid_sink),
-        say_something(sender, sid_src, app_state)
+        hear_stuff(receiver, sid_sink, dg_sender),
+        say_something(sender, sid_src, dg_receiver, app_state)
     );
 }
 
 async fn hear_stuff(
     mut receiver: SplitStream<WebSocket>,
     sid_sink: oneshot::Sender<String>,
+    mut dg_sender: SplitSink<
+        WebSocketStream<MaybeTlsStream<TcpStream>>,
+        tokio_tungstenite::tungstenite::Message,
+    >,
 ) -> Result<(), ()> {
+    // TODO: instead of this weirdness, wrap sid_sink in something (Option?) like in
+    // buttercup::handlers::twilio::handle_from_twilio_ws
     let mut stream_sid = String::new();
     while let Some(msg) = receiver.next().await {
         match msg {
@@ -99,7 +121,14 @@ async fn hear_stuff(
             Ok(Message::Text(json)) => {
                 match serde_json::from_str(&json) {
                     Ok(message) => match message {
-                        TwilioMessage::Media { .. } => {
+                        TwilioMessage::Media { media, .. } => {
+                            let mut chunk = Vec::new();
+                            b64_decode_to_buf(media.payload, &mut chunk);
+                            dg_sender
+                                .send(tokio_tungstenite::tungstenite::Message::Binary(chunk))
+                                .await
+                                .unwrap();
+                            // base64 bytes = media.payload
                             // println!("Got media message {sequence_number} for {stream_sid}");
                         }
                         TwilioMessage::Stop {
@@ -132,6 +161,7 @@ async fn hear_stuff(
 async fn say_something(
     mut sender: SplitSink<WebSocket, Message>,
     sid_src: oneshot::Receiver<String>,
+    mut dg_receiver: SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>,
     app_state: Arc<AppState>,
 ) -> Result<(), ()> {
     // Get stream sid from incoming ws channel
@@ -143,48 +173,44 @@ async fn say_something(
     let stream_sid = res.unwrap();
     println!("say_something got stream sid {stream_sid}");
 
-    sleep(Duration::from_secs(1)).await;
-
-    // Get tts bytes from Google
-    let text = r#"Hello. You are hearing this
-    from a Twilio websocket connection. These
-    bytes are mulaw encoded."#;
-    let payload = app_state
-        .get_google_tts(text, AudioConfigAudioEncoding::LINEAR16)
-        .await;
-    // Decode payload string
-    let mut body = Vec::new();
-    b64_decode_to_buf(payload, &mut body);
-    let mut file = tokio::fs::File::create("dev/lin16.wav").await.unwrap();
-    file.write_all(&body[..]).await.unwrap();
-    // Clip wav header
-    let trimmed = body[44..].to_vec();
-    let mut file = tokio::fs::File::create("dev/lin16.dat").await.unwrap();
-    file.write_all(&trimmed[..]).await.unwrap();
-    // Transcode to mulaw
-    let mut converted = vec![];
-    for sample in trimmed
-        .chunks_exact(2)
-        .map(|a| i16::from_ne_bytes([a[0], a[1]]))
-    {
-        converted.push(linear_to_ulaw(sample));
+    while let Some(Ok(msg)) = dg_receiver.next().await {
+        match msg {
+            tokio_tungstenite::tungstenite::Message::Text(msg) => {
+                let streaming_response =
+                    serde_json::from_str::<deepgram_types::StreamingResponse>(&msg).unwrap();
+                let transcript = &streaming_response.channel.alternatives[0].transcript;
+                if !transcript.is_empty() {
+                    sleep(Duration::from_secs(3)).await;
+                    let payload = app_state
+                        .get_google_tts(transcript, AudioConfigAudioEncoding::LINEAR16)
+                        .await;
+                    let mut body = Vec::new();
+                    b64_decode_to_buf(payload, &mut body);
+                    let trimmed = body[44..].to_vec();
+                    let mut converted = vec![];
+                    for sample in trimmed
+                        .chunks_exact(2)
+                        .map(|a| i16::from_ne_bytes([a[0], a[1]]))
+                    {
+                        converted.push(linear_to_ulaw(sample));
+                    }
+                    let re_encoded: String = engine::general_purpose::STANDARD.encode(converted);
+                    let outbound_media_meta = OutboundMediaMeta {
+                        payload: re_encoded,
+                    };
+                    let outbound_media = TwilioOutbound::Media {
+                        media: outbound_media_meta,
+                        stream_sid: stream_sid.clone(),
+                    };
+                    let json = serde_json::to_string(&outbound_media).unwrap();
+                    let message = Message::Text(json.clone());
+                    sender.send(message).await.unwrap();
+                }
+                println!("DG says: {msg}");
+            }
+            _ => println!("Got unsupported message type from Deepgram."),
+        }
     }
-    let mut file = tokio::fs::File::create("dev/ulaw.dat").await.unwrap();
-    file.write_all(&converted[..]).await.unwrap();
-    // base64-encode the trimmed raw audio
-    let re_encoded: String = engine::general_purpose::STANDARD.encode(converted);
-    // Construct a Media message to send to Twilio.
-    let outbound_media_meta = OutboundMediaMeta {
-        payload: re_encoded,
-    };
-    let outbound_media = TwilioOutbound::Media {
-        media: outbound_media_meta,
-        stream_sid: stream_sid.clone(),
-    };
-    let json = serde_json::to_string(&outbound_media).unwrap();
-
-    let message = Message::Text(json);
-    sender.send(message).await.unwrap();
 
     Ok(())
 }
@@ -281,6 +307,7 @@ async fn twiml_start_play(Host(host): Host) -> impl IntoResponse {
 }
 
 struct AppState {
+    console_api_key: String,
     gcs_client: TextService,
 }
 
@@ -342,9 +369,13 @@ async fn gcs_client() -> TextService {
 async fn main() {
     dotenvy::dotenv().unwrap();
 
+    let console_api_key = env::var("CONSOLE_API_KEY").unwrap();
     let gcs_client = gcs_client().await;
 
-    let app_state = Arc::new(AppState { gcs_client });
+    let app_state = Arc::new(AppState {
+        console_api_key,
+        gcs_client,
+    });
 
     let app = Router::new()
         .route("/connect", get(ws_handler))

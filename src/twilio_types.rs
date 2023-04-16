@@ -98,6 +98,10 @@ mod ws {
             #[serde(rename = "streamSid")]
             stream_sid: String,
         },
+        Clear {
+            #[serde(rename = "streamSid")]
+            stream_sid: String,
+        },
     }
 
     #[derive(Serialize, Deserialize)]
@@ -168,10 +172,10 @@ mod ws {
 
     #[derive(Serialize, Deserialize)]
     pub struct MediaMeta {
-        track: MediaTrack,
-        chunk: String,
-        timestamp: String,
-        payload: String,
+        pub track: MediaTrack,
+        pub chunk: String,
+        pub timestamp: String,
+        pub payload: String,
     }
 
     #[derive(Serialize, Deserialize)]

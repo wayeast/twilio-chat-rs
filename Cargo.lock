@@ -495,12 +495,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "hound"
-version = "3.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4d13cdbd5dbb29f9c88095bbdc2590c9cba0d0a1269b983fef6b2cdd7e9f4db1"
-
-[[package]]
 name = "http"
 version = "0.2.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1330,8 +1324,12 @@ checksum = "54319c93411147bced34cb5609a80e0a8e44c5999c93903a81cd866630ec0bfd"
 dependencies = [
  "futures-util",
  "log",
+ "rustls 0.20.8",
+ "rustls-native-certs 0.6.2",
  "tokio",
+ "tokio-rustls 0.23.4",
  "tungstenite",
+ "webpki 0.22.0",
 ]
 
 [[package]]
@@ -1439,10 +1437,12 @@ dependencies = [
  "httparse",
  "log",
  "rand",
+ "rustls 0.20.8",
  "sha1",
  "thiserror",
  "url",
  "utf-8",
+ "webpki 0.22.0",
 ]
 
 [[package]]
@@ -1454,13 +1454,14 @@ dependencies = [
  "base64 0.21.0",
  "dotenvy",
  "futures-util",
- "hound",
+ "http",
  "hyper",
  "hyper-rustls 0.23.2",
  "quick-xml",
  "serde",
  "serde_json",
  "tokio",
+ "tokio-tungstenite",
  "tokio-util",
  "xmlserde",
  "xmlserde_derives",
