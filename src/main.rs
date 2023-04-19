@@ -28,6 +28,7 @@ use texttospeech_v1_types::{
     AudioConfig, AudioConfigAudioEncoding, SynthesisInput, SynthesizeSpeechRequest, TextService,
     TextSynthesizeParams, VoiceSelectionParams, VoiceSelectionParamsSsmlGender,
 };
+use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::oneshot;
 use tokio::time::sleep;
@@ -150,29 +151,29 @@ async fn say_something(
     from a Twilio websocket connection. These
     bytes are mulaw encoded."#;
     let payload = app_state
-        .get_google_tts(text, AudioConfigAudioEncoding::LINEAR16)
+        .get_google_tts(text, AudioConfigAudioEncoding::MULAW)
         .await;
     // Decode payload string
     let mut body = Vec::new();
     b64_decode_to_buf(payload, &mut body);
-    let mut file = tokio::fs::File::create("dev/lin16.wav").await.unwrap();
+    let mut file = File::create("dev/ulaw.wav").await.unwrap();
     file.write_all(&body[..]).await.unwrap();
     // Clip wav header
     let trimmed = body[44..].to_vec();
-    let mut file = tokio::fs::File::create("dev/lin16.dat").await.unwrap();
+    let mut file = File::create("dev/ulaw.dat").await.unwrap();
     file.write_all(&trimmed[..]).await.unwrap();
-    // Transcode to mulaw
-    let mut converted = vec![];
-    for sample in trimmed
-        .chunks_exact(2)
-        .map(|a| i16::from_ne_bytes([a[0], a[1]]))
-    {
-        converted.push(linear_to_ulaw(sample));
-    }
-    let mut file = tokio::fs::File::create("dev/ulaw.dat").await.unwrap();
-    file.write_all(&converted[..]).await.unwrap();
+    // // Transcode to mulaw
+    // let mut converted = vec![];
+    // for sample in trimmed
+    //     .chunks_exact(2)
+    //     .map(|a| i16::from_ne_bytes([a[0], a[1]]))
+    // {
+    //     converted.push(linear_to_ulaw(sample));
+    // }
+    // let mut file = File::create("dev/ulaw.dat").await.unwrap();
+    // file.write_all(&converted[..]).await.unwrap();
     // base64-encode the trimmed raw audio
-    let re_encoded: String = engine::general_purpose::STANDARD.encode(converted);
+    let re_encoded: String = engine::general_purpose::STANDARD.encode(trimmed);
     // Construct a Media message to send to Twilio.
     let outbound_media_meta = OutboundMediaMeta {
         payload: re_encoded,
