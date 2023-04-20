@@ -21,6 +21,7 @@ use futures_util::{
     stream::{SplitSink, SplitStream, StreamExt},
 };
 use gcs_common::yup_oauth2;
+use std::collections::VecDeque;
 use std::env;
 use std::io::{Cursor, Read};
 use std::sync::Arc;
@@ -49,7 +50,12 @@ async fn socket_handler(socket: WebSocket, app_state: Arc<AppState>) {
 
     // connect to Deepgram
     println!("Connecting to DG");
-    let uri = "wss://api.deepgram.com/v1/listen?encoding=mulaw&sample_rate=8000";
+    // not sure if endpointing on/off makes much difference???
+    let uri = "wss://api.deepgram.com/v1/listen\
+               ?encoding=mulaw\
+               &sample_rate=8000\
+               &interim_results=true\
+               &endpointing=false";
     let mut rq = uri.into_client_request().unwrap();
     rq.headers_mut()
         .entry(http::header::AUTHORIZATION)
@@ -57,7 +63,6 @@ async fn socket_handler(socket: WebSocket, app_state: Arc<AppState>) {
             http::header::HeaderValue::from_str(&format!("Token {}", app_state.console_api_key))
                 .unwrap(),
         );
-    // let rq = http::Request::builder().method(http::method::Method::GET).uri(uri).header("Authorization", format!("Token {}", app_state.console_api_key)).body(()).unwrap();
     let (ws_stream, _) = connect_async(rq).await.unwrap();
     let (dg_sender, dg_receiver) = ws_stream.split();
 
@@ -161,6 +166,16 @@ async fn hear_stuff(
     Ok(())
 }
 
+async fn twilio_stop_talking(stream_sid: &str, twilio_sink: &mut SplitSink<WebSocket, Message>) {
+    let outbound_clear = TwilioOutbound::Clear {
+        stream_sid: stream_sid.to_string(),
+    };
+    let json = serde_json::to_string(&outbound_clear).unwrap();
+    let message = Message::Text(json.clone());
+    twilio_sink.send(message).await.unwrap();
+}
+
+const GOOGLE_WAV_HEADER_SZ: usize = 58;
 async fn say_something(
     mut sender: SplitSink<WebSocket, Message>,
     sid_src: oneshot::Receiver<String>,
@@ -176,9 +191,9 @@ async fn say_something(
     let stream_sid = res.unwrap();
     println!("say_something got stream sid {stream_sid}");
 
-    const POLITENESS_DELAY_MILLIS: u128 = 2_000;
+    const POLITENESS_DELAY_MILLIS: u128 = 1_500;
     let mut last_talking = Instant::now();
-    let mut stuff_buff = String::new();
+    let mut media_buff = VecDeque::new();
     while let Some(Ok(msg)) = dg_receiver.next().await {
         match msg {
             tokio_tungstenite::tungstenite::Message::Text(msg) => {
@@ -186,62 +201,34 @@ async fn say_something(
                     serde_json::from_str::<deepgram_types::StreamingResponse>(&msg).unwrap();
                 let transcript = &streaming_response.channel.alternatives[0].transcript;
                 if !transcript.is_empty() {
-                    // caller is talking; let's send a clear message to twilio.  we probably want
-                    // to keep better track of whether or not there is anything in twilio's buffer,
-                    // but as a first pass, let's try this brutish strategy
-                    let outbound_clear = TwilioOutbound::Clear {
-                        stream_sid: stream_sid.clone(),
-                    };
-                    let json = serde_json::to_string(&outbound_clear).unwrap();
-                    let message = Message::Text(json.clone());
-                    sender.send(message).await.unwrap();
-                }
-                if (!transcript.is_empty() && !stuff_buff.is_empty())
-                    || (!transcript.is_empty() && stuff_buff.is_empty())
-                {
                     // caller has either been talking and continues to talk, or has just started talking;
-                    // just append transcript to stuff_buff
-                    stuff_buff.push(' ');
-                    stuff_buff.push_str(transcript);
+                    // We first need to tell Twilio to stop talking...
+                    println!("Got non-empty transcript result from DG!");
+                    twilio_stop_talking(&stream_sid, &mut sender).await;
+                    if streaming_response.is_final {
+                        println!("    ...non-empty transcript result is final!");
+                        let payload = app_state
+                            .get_google_tts(transcript, AudioConfigAudioEncoding::MULAW)
+                            .await;
+                        let twilio_media_msg = google2twilio(payload, &stream_sid).await;
+                        media_buff.push_back(twilio_media_msg);
+                    }
                     last_talking = Instant::now();
-                } else if transcript.is_empty() && !stuff_buff.is_empty() {
+                } else {
                     // caller has been talking but stopped; if, politeness delay has transpired,
                     // try to respond.
+                    println!("Got empty transcript result from DG!");
                     let since_last_talking = last_talking.elapsed().as_millis();
                     if since_last_talking > POLITENESS_DELAY_MILLIS {
-                        println!("sending transcript to googs: '{stuff_buff}'");
-                        let payload = app_state
-                            .get_google_tts(&stuff_buff, AudioConfigAudioEncoding::LINEAR16)
-                            .await;
-                        stuff_buff.clear();
-                        let mut body = Vec::new();
-                        b64_decode_to_buf(payload, &mut body);
-                        let trimmed = body[44..].to_vec();
-                        let mut converted = vec![];
-                        for sample in trimmed
-                            .chunks_exact(2)
-                            .map(|a| i16::from_ne_bytes([a[0], a[1]]))
-                        {
-                            converted.push(linear_to_ulaw(sample));
+                        while let Some(msg) = media_buff.pop_front() {
+                            let json = serde_json::to_string(&msg).unwrap();
+                            let message = Message::Text(json.clone());
+                            sender.send(message).await.unwrap();
                         }
-                        let re_encoded: String =
-                            engine::general_purpose::STANDARD.encode(converted);
-                        let outbound_media_meta = OutboundMediaMeta {
-                            payload: re_encoded,
-                        };
-                        let outbound_media = TwilioOutbound::Media {
-                            media: outbound_media_meta,
-                            stream_sid: stream_sid.clone(),
-                        };
-                        let json = serde_json::to_string(&outbound_media).unwrap();
-                        let message = Message::Text(json.clone());
-                        sender.send(message).await.unwrap();
                     } else {
                         // we've detected the caller stopped talking, but not enough time has
                         // elapsed for us to cut in (politely)
                     }
-                } else {
-                    // nothing has been said, and nothing is being said; ignore
                 }
             }
             _ => println!("Got unsupported message type from Deepgram."),
@@ -251,25 +238,18 @@ async fn say_something(
     Ok(())
 }
 
-fn linear_to_ulaw(sample: i16) -> u8 {
-    let mut pcm_value = sample;
-    let sign = (pcm_value >> 8) & 0x80;
-    if sign != 0 && pcm_value.checked_mul(-1).is_some() {
-        pcm_value *= -1;
+async fn google2twilio(google_tts: String, stream_sid: &str) -> TwilioOutbound {
+    let mut body = Vec::new();
+    b64_decode_to_buf(google_tts, &mut body);
+    let trimmed = body[GOOGLE_WAV_HEADER_SZ..].to_vec();
+    let re_encoded: String = engine::general_purpose::STANDARD.encode(trimmed);
+    let outbound_media_meta = OutboundMediaMeta {
+        payload: re_encoded,
+    };
+    TwilioOutbound::Media {
+        media: outbound_media_meta,
+        stream_sid: stream_sid.to_string(),
     }
-    if pcm_value > 32635 {
-        pcm_value = 32635;
-    }
-    pcm_value += 0x84;
-    let mut exponent: i16 = 7;
-    let mut mask = 0x4000;
-    while pcm_value & mask == 0 {
-        exponent -= 1;
-        mask >>= 1;
-    }
-    let manitssa: i16 = (pcm_value >> (exponent + 3)) & 0x0f;
-    let ulaw_value = sign | exponent << 4 | manitssa;
-    (!ulaw_value) as u8
 }
 
 fn b64_decode_to_buf(enc: String, buf: &mut Vec<u8>) {
