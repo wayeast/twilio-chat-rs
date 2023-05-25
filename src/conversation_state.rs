@@ -1,7 +1,6 @@
 use crate::consts::{ASCII_CLAUSE_ENDINGS, POLITENESS_DELAY_MILLIS};
 use crate::deepgram_types::{StreamMessage, StreamingResponse};
 use crate::error::AppError;
-use crate::google2twilio;
 use crate::openai_types::{
     OpenAIBatchResponse, OpenAIMessage, OpenAIPayload, OpenAIStreamResponse, StreamDelta,
 };
@@ -10,6 +9,7 @@ use crate::twilio_types::TwilioOutbound;
 use crate::types::{
     AppState, ConversationSignal, ConversationSummary, ConversationTurn, CurrentBotAction,
 };
+use crate::utils::google2twilio;
 
 use axum::extract::ws::{Message, WebSocket};
 use futures_util::{
@@ -284,10 +284,10 @@ impl ConversationState {
             let bot_side = turn.bot_side.read().await;
             // TODO: check that we're not sending empty strings or junk.  Perhaps have chatgpt tell
             // us if what we're sending is worth summarizing???
-            let summary = self
-                .get_conversation_summary_for_bot_side(&bot_side)
-                .await;
-            if summary.is_err() { continue }
+            let summary = self.get_conversation_summary_for_bot_side(&bot_side).await;
+            if summary.is_err() {
+                continue;
+            }
             let summary = summary.unwrap();
             debug!(summary=?summary, "summary");
             summaries.push(summary);
