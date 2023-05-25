@@ -1,4 +1,6 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use uuid::Uuid;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct StreamingResponse {
@@ -29,4 +31,30 @@ pub struct Word {
     pub start: f32,
     pub end: f32,
     pub confidence: f32,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct StreamingMeta {
+    transaction_key: Option<String>,
+    request_id: Uuid,
+    sha256: String,
+    // created: OffsetDateTime,
+    duration: f32,
+    channels: u16,
+    models: Vec<Uuid>,
+    model_info: HashMap<Uuid, ModelInfo>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ModelInfo {
+    name: String,
+    version: String,
+    arch: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(untagged)]
+pub enum StreamMessage {
+    StreamingResponse(StreamingResponse),
+    StreamingMeta(StreamingMeta),
 }

@@ -80,12 +80,12 @@ mod ws {
     use serde::{Deserialize, Serialize};
     use std::collections::HashMap;
 
-    #[derive(Serialize, Deserialize)]
+    #[derive(Clone, Serialize, Deserialize)]
     pub struct OutboundMarkMeta {
         pub name: String,
     }
 
-    #[derive(Serialize, Deserialize)]
+    #[derive(Clone, Serialize, Deserialize)]
     #[serde(rename_all = "lowercase", tag = "event")]
     pub enum TwilioOutbound {
         Mark {
@@ -104,7 +104,7 @@ mod ws {
         },
     }
 
-    #[derive(Serialize, Deserialize)]
+    #[derive(Clone, Serialize, Deserialize)]
     pub struct OutboundMediaMeta {
         pub payload: String,
     }
@@ -146,7 +146,7 @@ mod ws {
         },
     }
 
-    #[derive(Serialize, Deserialize)]
+    #[derive(Serialize, Deserialize, Debug)]
     pub struct StartMeta {
         #[serde(rename = "streamSid")]
         pub stream_sid: String,
@@ -162,7 +162,7 @@ mod ws {
         pub media_format: MediaFormat,
     }
 
-    #[derive(Serialize, Deserialize)]
+    #[derive(Serialize, Deserialize, Debug)]
     pub struct MediaFormat {
         pub encoding: String,
         #[serde(rename = "sampleRate")]
@@ -199,3 +199,58 @@ mod ws {
     }
 }
 pub use ws::*;
+
+mod connect {
+    use serde::Deserialize;
+
+    #[derive(Deserialize, Debug)]
+    #[serde(rename_all = "kebab-case")]
+    pub enum CallStatus {
+        Queued,
+        Ringing,
+        InProgress,
+        Completed,
+        Busy,
+        Failed,
+        NoAnswer,
+    }
+
+    #[derive(Deserialize, Debug)]
+    #[serde(rename_all = "kebab-case")]
+    pub enum CallDirection {
+        Inbound,
+        OutboundApi,
+        OutboundDial,
+    }
+
+    #[allow(dead_code)]
+    #[derive(Deserialize, Debug)]
+    #[serde(rename_all = "PascalCase")]
+    pub struct TwilioConnectPayload {
+        pub account_sid: String,
+        pub api_version: String,
+        pub call_sid: String,
+        pub call_status: CallStatus,
+        pub call_token: String,
+        pub called: String,
+        pub called_city: Option<String>,
+        pub called_country: Option<String>,
+        pub called_state: Option<String>,
+        pub called_zip: Option<String>,
+        pub caller: Option<String>,
+        pub caller_state: Option<String>,
+        pub caller_zip: Option<String>,
+        pub direction: CallDirection,
+        pub from: String,
+        pub from_city: Option<String>,
+        pub from_country: Option<String>,
+        pub from_state: Option<String>,
+        pub from_zip: Option<String>,
+        pub to: String,
+        pub to_city: Option<String>,
+        pub to_country: Option<String>,
+        pub to_state: Option<String>,
+        pub to_zip: Option<String>,
+    }
+}
+pub use connect::*;
