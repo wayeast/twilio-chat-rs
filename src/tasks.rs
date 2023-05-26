@@ -111,39 +111,39 @@ pub async fn manage_conversation(
         }
     }?;
 
-    // TODO: After the call, prepare a summary to send via text
-    let conversation_summaries = state.get_conversation_summaries().await?;
-    let sms_summary = conversation_summaries
-        .iter()
-        .map(|s| format!("{}: {}", s.topic, s.summary))
-        .collect::<Vec<String>>()
-        .join("\n\n");
-    debug!(summay=?sms_summary, "sms summary");
-
-    // Depending on whether the summary result was an error, send a summary or an apology
-    // TODO: only send 3/4 summaries per sms???
-    let account_sid = &app_state.twilio_account_sid;
-    let url = format!("https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages.json");
-    let mut form = HashMap::new();
-    form.insert("From", &state.twilio_connect_payload.to);
-    form.insert("To", &state.twilio_connect_payload.from);
-    form.insert("Body", &sms_summary);
-    let resp = app_state
-        .http_client
-        .post(url)
-        .basic_auth(account_sid, Some(&app_state.twilio_auth_token))
-        .form(&form)
-        .send()
-        .await
-        .map_err(|e| {
-            error!(error=%e, "failed to send sms reqeust to twilio");
-            AppError("twilio sms api")
-        }); // we don't really care if this succeeds or fails
-if let Ok(resp) = resp {
-    let status = resp.status();
-    let body = resp.text().await;
-    debug!(status=?status, body=?body, "twilio sms post response");
-}
+    // Send summaries of each bot answer as discrete sms
+    let from = state.twilio_connect_payload.to.to_string();
+    let to = state.twilio_connect_payload.from.to_string();
+    for summary in state.get_conversation_summaries().await? {
+        let url = format!(
+            "https://api.twilio.com/2010-04-01/Accounts/{}/Messages.json",
+            app_state.twilio_account_sid
+        );
+        let body = format!("{}: {}", summary.topic, summary.summary);
+        let mut form = HashMap::new();
+        form.insert("From", &from);
+        form.insert("To", &to);
+        form.insert("Body", &body);
+        let resp = app_state
+            .http_client
+            .post(url)
+            .basic_auth(
+                &app_state.twilio_account_sid,
+                Some(&app_state.twilio_auth_token),
+            )
+            .form(&form)
+            .send()
+            .await
+            .map_err(|e| {
+                error!(error=%e, "failed to send sms reqeust to twilio");
+                AppError("twilio sms api")
+            });
+        if let Ok(resp) = resp {
+            let status = resp.status();
+            let body = resp.text().await;
+            debug!(status=?status, body=?body, "twilio sms post response");
+        }
+    }
 
     // Insert stuff into db
     state.insert_db_row().await?;

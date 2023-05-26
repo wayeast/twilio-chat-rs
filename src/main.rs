@@ -33,7 +33,7 @@ pub mod consts {
 
 #[tokio::main]
 async fn main() {
-    if let Err(_) = dotenvy::dotenv() {
+    if dotenvy::dotenv().is_err() {
         warn!("No .env file found; app settings must already be set.");
     }
     let subscriber = tracing_subscriber::registry()
@@ -56,7 +56,7 @@ async fn main() {
     let database_url = env::var("DATABASE_URL").expect("DATABASE_URL not set!");
     let gcs_credentials = include_str!("../chattts-383503-5155ada8252c.json");
 
-    let gcs_client = utils::gcs_client(&gcs_credentials).await;
+    let gcs_client = utils::gcs_client(gcs_credentials).await;
     let http_client = reqwest::Client::new();
     let streams = Arc::new(Mutex::new(HashMap::new()));
     let db_pool = PgPoolOptions::new()
