@@ -23,7 +23,7 @@ use tokio::sync::mpsc;
 use tokio::task;
 use tokio::time::sleep;
 use tokio_tungstenite::tungstenite;
-use tracing::{debug, error, warn};
+use tracing::{debug, error, trace, warn};
 use uuid::Uuid;
 
 pub struct ConversationState {
@@ -281,7 +281,7 @@ impl ConversationState {
     pub async fn get_conversation_summaries(
         &mut self,
     ) -> Result<&Vec<ConversationSummary>, AppError> {
-        debug!("in get_conversation_summaries");
+        trace!("in get_conversation_summaries");
         if self.conversation_summaries.is_none() {
             // wait up to 5 seconds for all unfinished tasks to complete
             let mut tries = 0;
@@ -295,7 +295,7 @@ impl ConversationState {
                 }
             }
 
-            debug!("done waiting on tasks; getting summaries");
+            trace!("done waiting on tasks; getting summaries");
             let mut summaries: Vec<ConversationSummary> = vec![];
             for (idx, turn) in self.conversation_turns.iter().enumerate() {
                 let bot_side = turn.bot_side.read().await;
@@ -624,13 +624,13 @@ async fn bot_side_manager(
                     error!(error=%e, "failed to parse string from OpenAI streamed chunk");
                     AppError("Error deserializing OpenAI streamed choice")
                 })?;
-                debug!(response=%response_string, "got openai string");
+                trace!(response=%response_string, "got openai string");
                 let responses: Vec<OpenAIStreamResponse> = response_string
                     .lines()
                     .filter_map(|l| l.strip_prefix("data: "))
                     .filter_map(|l| serde_json::from_str::<OpenAIStreamResponse>(l).ok())
                     .collect();
-                debug!(responses=?responses, "got openai responses");
+                trace!(responses=?responses, "got openai responses");
                 for response in responses {
                     match &response.choices[0].delta {
                         StreamDelta::Role { role } => {
@@ -639,7 +639,7 @@ async fn bot_side_manager(
                             }
                         }
                         StreamDelta::Content { content } => {
-                            debug!(content=%content, "handling Content response");
+                            trace!(content=%content, "handling Content response");
                             extend_bot_side(&turn, content).await;
                             chat_buffer.push_str(content);
                             if ASCII_CLAUSE_ENDINGS.contains(&content.as_str()) {
@@ -648,7 +648,7 @@ async fn bot_side_manager(
                                 let payload = app_state
                                     .get_google_tts(&tts_text, AudioConfigAudioEncoding::MULAW)
                                     .await;
-                                debug!("got google tts payload");
+                                trace!("got google tts payload");
 
                                 let res = media_sink.try_send(payload);
                                 if let Err(mpsc::error::TrySendError::Full(_)) = res {
@@ -670,7 +670,7 @@ async fn bot_side_manager(
                             let payload = app_state
                                 .get_google_tts(&tts_text, AudioConfigAudioEncoding::MULAW)
                                 .await;
-                            debug!("got google tts payload");
+                            trace!("got google tts payload");
 
                             let res = media_sink.try_send(payload);
                             if let Err(mpsc::error::TrySendError::Full(_)) = res {
@@ -707,7 +707,7 @@ async fn send_twilio_media_messages_until_aborted(
     twilio_outbound_sink: mpsc::Sender<TwilioOutbound>,
 ) -> Result<(), AppError> {
     while let Some(encoded_tts) = media_stream.recv().await {
-        debug!("sending tts to twilio");
+        trace!("sending tts to twilio");
         let twilio_media_msg = google2twilio(encoded_tts, &stream_id).await;
         twilio_outbound_sink
             .send(twilio_media_msg)

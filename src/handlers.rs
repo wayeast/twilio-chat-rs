@@ -25,7 +25,7 @@ use tokio_tungstenite::{
     tungstenite::{self, client::IntoClientRequest},
     MaybeTlsStream, WebSocketStream,
 };
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, trace};
 
 /// Capture the Twilio Start media message from the beginning of a Twilio websocket stream for the
 /// stream id.
@@ -38,7 +38,7 @@ async fn get_twilio_start_meta(
                 Ok(Message::Text(json)) => match serde_json::from_str(&json) {
                     Ok(message) => match message {
                         TwilioMessage::Connected { protocol, version } => {
-                            debug!("Got connected message with {protocol} and {version}");
+                            trace!("Got connected message with {protocol} and {version}");
                         }
                         TwilioMessage::Start {
                             start: start_meta, ..
@@ -75,7 +75,7 @@ async fn open_dg_stream(
     ),
     AppError,
 > {
-    debug!("Connecting to DG");
+    trace!("Connecting to DG");
     // TODO: not sure if endpointing on/off makes much difference???
     let uri = "wss://api.deepgram.com/v1/listen\
                ?encoding=mulaw\
@@ -149,7 +149,7 @@ pub async fn twiml_start_connect(
     State(app_state): State<Arc<AppState>>,
     body: String,
 ) -> impl IntoResponse {
-    debug!(body=%body, "start request body");
+    trace!(body=%body, "start request body");
     let payload = serde_urlencoded::from_str::<TwilioConnectPayload>(&body);
     if let Err(e) = payload {
         error!(error=%e, "failed to deserialize Twilio connect payload");
@@ -186,7 +186,7 @@ pub async fn twiml_start_connect(
     };
 
     let twiml = wrap_twiml(xmlserde::xml_serialize(response));
-    debug!("twiml: '{}'", twiml);
+    trace!("twiml: '{}'", twiml);
 
     let mut headers = HeaderMap::new();
     headers.insert(header::CONTENT_TYPE, "application/xml".parse().unwrap());
@@ -204,7 +204,7 @@ pub async fn twiml_start_play(Host(host): Host) -> impl IntoResponse {
         actions: vec![ResponseAction::Play(play_action)],
     };
     let twiml = wrap_twiml(xmlserde::xml_serialize(response));
-    debug!("twiml: '{}'", twiml);
+    trace!("twiml: '{}'", twiml);
 
     let mut headers = HeaderMap::new();
     headers.insert(header::CONTENT_TYPE, "application/xml".parse().unwrap());
