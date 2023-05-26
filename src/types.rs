@@ -5,6 +5,7 @@ use crate::texttospeech_v1_types::{
 };
 use crate::twilio_types::TwilioConnectPayload;
 
+use sqlx::{Pool, Postgres};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, RwLock};
@@ -39,6 +40,7 @@ pub enum ConversationSignal {
 
 #[derive(Debug)]
 pub struct ConversationSummary {
+    pub idx: usize,
     pub topic: String,
     pub summary: String,
 }
@@ -52,6 +54,7 @@ pub struct AppState {
     pub http_client: reqwest::Client,
     // call sid => twilio connect meta
     pub streams: Arc<Mutex<HashMap<String, TwilioConnectPayload>>>,
+    pub db_pool: Pool<Postgres>,
 }
 
 impl AppState {

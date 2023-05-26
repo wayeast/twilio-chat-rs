@@ -35,8 +35,7 @@ pub async fn gcs_client(gcs_credentials: &str) -> TextService {
         .enable_http2()
         .build();
     let tls_client = hyper::Client::builder().build(conn);
-    let service_account_key = yup_oauth2::read_service_account_key(gcs_credentials)
-        .await
+    let service_account_key = yup_oauth2::parse_service_account_key(gcs_credentials)
         .expect("failed to read GCS account key");
     let gcs_authenticator = yup_oauth2::ServiceAccountAuthenticator::builder(service_account_key)
         .hyper_client(tls_client.clone())

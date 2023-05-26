@@ -1,0 +1,177 @@
+{
+  "db": "PostgreSQL",
+  "9a56c66a8eac302ebbd5b31d94adf1a1d7f9564772e6370b652e6329838f0568": {
+    "describe": {
+      "columns": [
+        {
+          "name": "id",
+          "ordinal": 0,
+          "type_info": "Int4"
+        },
+        {
+          "name": "caller",
+          "ordinal": 1,
+          "type_info": "Int4"
+        },
+        {
+          "name": "twilio_call_sid",
+          "ordinal": 2,
+          "type_info": "Text"
+        },
+        {
+          "name": "twilio_stream_sid",
+          "ordinal": 3,
+          "type_info": "Text"
+        },
+        {
+          "name": "dg_request_id",
+          "ordinal": 4,
+          "type_info": "Uuid"
+        },
+        {
+          "name": "created",
+          "ordinal": 5,
+          "type_info": "Timestamptz"
+        }
+      ],
+      "nullable": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        false
+      ],
+      "parameters": {
+        "Left": [
+          "Int4",
+          "Text",
+          "Text",
+          "Uuid"
+        ]
+      }
+    },
+    "query": "\n            insert into calls (\n              caller,\n              twilio_call_sid,\n              twilio_stream_sid,\n              dg_request_id\n            )\n            values (\n              $1,\n              $2,\n              $3,\n              $4\n            )\n            returning *\n            "
+  },
+  "b8270d84dc5e24bdc5a7b6490d22c0f69ed7739f808f4101fcb6cc6e385f1a72": {
+    "describe": {
+      "columns": [
+        {
+          "name": "id",
+          "ordinal": 0,
+          "type_info": "Int4"
+        },
+        {
+          "name": "phone",
+          "ordinal": 1,
+          "type_info": "Text"
+        },
+        {
+          "name": "city",
+          "ordinal": 2,
+          "type_info": "Text"
+        },
+        {
+          "name": "state",
+          "ordinal": 3,
+          "type_info": "Text"
+        },
+        {
+          "name": "country",
+          "ordinal": 4,
+          "type_info": "Text"
+        },
+        {
+          "name": "zip",
+          "ordinal": 5,
+          "type_info": "Text"
+        }
+      ],
+      "nullable": [
+        false,
+        false,
+        true,
+        true,
+        true,
+        true
+      ],
+      "parameters": {
+        "Left": [
+          "Text"
+        ]
+      }
+    },
+    "query": "\n            select *\n            from callers\n            where phone = $1\n            "
+  },
+  "e715dc7e01f6969674323bd525d66c0522d2b7019f4e5811d451047254477d4f": {
+    "describe": {
+      "columns": [
+        {
+          "name": "id",
+          "ordinal": 0,
+          "type_info": "Int4"
+        },
+        {
+          "name": "phone",
+          "ordinal": 1,
+          "type_info": "Text"
+        },
+        {
+          "name": "city",
+          "ordinal": 2,
+          "type_info": "Text"
+        },
+        {
+          "name": "state",
+          "ordinal": 3,
+          "type_info": "Text"
+        },
+        {
+          "name": "country",
+          "ordinal": 4,
+          "type_info": "Text"
+        },
+        {
+          "name": "zip",
+          "ordinal": 5,
+          "type_info": "Text"
+        }
+      ],
+      "nullable": [
+        false,
+        false,
+        true,
+        true,
+        true,
+        true
+      ],
+      "parameters": {
+        "Left": [
+          "Text",
+          "Text",
+          "Text",
+          "Text",
+          "Text"
+        ]
+      }
+    },
+    "query": "\n                insert into callers (\n                  phone,\n                  city,\n                  state,\n                  country,\n                  zip\n                ) values (\n                  $1,\n                  $2,\n                  $3,\n                  $4,\n                  $5\n                )\n                returning *\n                "
+  },
+  "f809ca4b6763e3a491e666880108eee84c5a0a004794e4438d25bf238723ebc2": {
+    "describe": {
+      "columns": [],
+      "nullable": [],
+      "parameters": {
+        "Left": [
+          "Int4Array",
+          "Int4Array",
+          "TextArray",
+          "TextArray",
+          "TextArray",
+          "TextArray"
+        ]
+      }
+    },
+    "query": "\n            insert into turns (\n              call,\n              call_idx,\n              caller_side,\n              bot_side,\n              topic,\n              summary\n            )\n            select * from unnest (\n              $1::integer[],\n              $2::integer[],\n              $3::text[],\n              $4::text[],\n              $5::text[],\n              $6::text[]\n            )\n            "
+  }
+}

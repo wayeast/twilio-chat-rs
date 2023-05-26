@@ -78,8 +78,22 @@ pub async fn manage_conversation(
     twilio_start_meta: StartMeta,
     app_state: Arc<AppState>,
 ) -> Result<(), AppError> {
-    let mut state =
-        ConversationState::new(twilio_start_meta.stream_sid, twilio_sink, app_state.clone()).await;
+    let twilio_connect_payload: TwilioConnectPayload = {
+        let mut streams = app_state.streams.lock().unwrap();
+        streams.remove(&twilio_start_meta.call_sid)
+    }
+    .ok_or_else(|| {
+        error!("failed to remove twilio connect payload from app state streams");
+        AppError("app state streams error")
+    })?;
+
+    let mut state = ConversationState::new(
+        twilio_start_meta.stream_sid,
+        twilio_connect_payload,
+        twilio_sink,
+        app_state.clone(),
+    )
+    .await;
 
     // While a call is ongoing, we continuously loop over streaming responses from DG
     loop {
@@ -106,23 +120,14 @@ pub async fn manage_conversation(
         .join("\n\n");
     debug!(summay=?sms_summary, "sms summary");
 
-    // remoce connect payload from app state cache
-    let connect_payload: TwilioConnectPayload = {
-        let mut streams = app_state.streams.lock().unwrap();
-        streams.remove(&twilio_start_meta.call_sid)
-    }
-    .ok_or_else(|| {
-        error!("failed to remove twilio connect payload from app state streams");
-        AppError("app state streams error")
-    })?;
-
     // Depending on whether the summary result was an error, send a summary or an apology
+    // TODO: only send 3/4 summaries per sms???
     let account_sid = &app_state.twilio_account_sid;
     let url = format!("https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages.json");
     let mut form = HashMap::new();
-    form.insert("From", connect_payload.to);
-    form.insert("To", connect_payload.from);
-    form.insert("Body", sms_summary);
+    form.insert("From", &state.twilio_connect_payload.to);
+    form.insert("To", &state.twilio_connect_payload.from);
+    form.insert("Body", &sms_summary);
     let resp = app_state
         .http_client
         .post(url)
@@ -134,9 +139,14 @@ pub async fn manage_conversation(
             error!(error=%e, "failed to send sms reqeust to twilio");
             AppError("twilio sms api")
         }); // we don't really care if this succeeds or fails
-    debug!(twilio_resp=?resp, "twilio sms resp");
+if let Ok(resp) = resp {
+    let status = resp.status();
+    let body = resp.text().await;
+    debug!(status=?status, body=?body, "twilio sms post response");
+}
 
     // Insert stuff into db
+    state.insert_db_row().await?;
 
     Ok(())
 }

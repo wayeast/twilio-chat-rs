@@ -35,14 +35,14 @@ pub struct Word {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct StreamingMeta {
-    transaction_key: Option<String>,
-    request_id: Uuid,
-    sha256: String,
+    pub transaction_key: Option<String>,
+    pub request_id: Uuid,
+    pub sha256: String,
     // created: OffsetDateTime,
-    duration: f32,
-    channels: u16,
-    models: Vec<Uuid>,
-    model_info: HashMap<Uuid, ModelInfo>,
+    pub duration: f32,
+    pub channels: u16,
+    pub models: Vec<Uuid>,
+    pub model_info: HashMap<Uuid, ModelInfo>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

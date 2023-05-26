@@ -1,11 +1,12 @@
 use crate::consts::{ASCII_CLAUSE_ENDINGS, POLITENESS_DELAY_MILLIS};
+use crate::db_types::{Call, Caller};
 use crate::deepgram_types::{StreamMessage, StreamingResponse};
 use crate::error::AppError;
 use crate::openai_types::{
     OpenAIBatchResponse, OpenAIMessage, OpenAIPayload, OpenAIStreamResponse, StreamDelta,
 };
 use crate::texttospeech_v1_types::AudioConfigAudioEncoding;
-use crate::twilio_types::TwilioOutbound;
+use crate::twilio_types::{TwilioConnectPayload, TwilioOutbound};
 use crate::types::{
     AppState, ConversationSignal, ConversationSummary, ConversationTurn, CurrentBotAction,
 };
@@ -23,6 +24,7 @@ use tokio::task;
 use tokio::time::sleep;
 use tokio_tungstenite::tungstenite;
 use tracing::{debug, error, warn};
+use uuid::Uuid;
 
 pub struct ConversationState {
     pub pause_msg: TwilioOutbound,
@@ -32,10 +34,15 @@ pub struct ConversationState {
     pub current_bot_action: CurrentBotAction,
     /// Data structure to store the running context of our conversation
     pub conversation_turns: Vec<Arc<ConversationTurn>>,
+    pub conversation_summaries: Option<Vec<ConversationSummary>>,
     /// Structure to measure how long since the caller has paused
     pub last_talking: Instant,
     /// The stream id collected from the Twilio Media message stream
     pub twilio_stream_id: String,
+    /// Connect payload from the initial Twilio connection
+    pub twilio_connect_payload: TwilioConnectPayload,
+    /// The request id for our Deepgram stream; we won't know this until the end of the stream
+    pub dg_request_id: Option<Uuid>,
     /// Task by which, when talking, we are sending Media messages to Twilio.  It is decoupled from
     /// the main `twilio_sink`, and made Option, in order to facilitate stopping talking when the
     /// caller cuts us off, but still collect a complete response from OpenAI for complete context.
@@ -48,6 +55,7 @@ pub struct ConversationState {
 impl ConversationState {
     pub async fn new(
         twilio_stream_id: String,
+        twilio_connect_payload: TwilioConnectPayload,
         twilio_sink: SplitSink<WebSocket, Message>,
         app_state: Arc<AppState>,
     ) -> Self {
@@ -66,14 +74,19 @@ impl ConversationState {
         let last_talking = Instant::now();
         let current_twilio_media_message_stream: Option<task::JoinHandle<Result<(), AppError>>> =
             None;
+        let dg_request_id: Option<Uuid> = None;
+        let conversation_summaries: Option<Vec<ConversationSummary>> = None;
 
         Self {
             pause_msg,
             join_handles,
             current_bot_action,
             conversation_turns,
+            conversation_summaries,
             last_talking,
             twilio_stream_id,
+            twilio_connect_payload,
+            dg_request_id,
             current_twilio_media_message_stream,
             twilio_outbound_sink,
             app_state,
@@ -255,7 +268,10 @@ impl ConversationState {
                             }
                         }
                     }
-                    StreamMessage::StreamingMeta(_) => Ok(()),
+                    StreamMessage::StreamingMeta(streaming_meta) => {
+                        self.dg_request_id = Some(streaming_meta.request_id);
+                        Ok(())
+                    }
                 }
             }
             _ => Ok(()),
@@ -264,40 +280,48 @@ impl ConversationState {
 
     pub async fn get_conversation_summaries(
         &mut self,
-    ) -> Result<Vec<ConversationSummary>, AppError> {
+    ) -> Result<&Vec<ConversationSummary>, AppError> {
         debug!("in get_conversation_summaries");
-        // wait up to 5 seconds for all unfinished tasks to complete
-        let mut tries = 0;
-        while tries < 5 {
-            let ok = self.join_handles.iter().all(|h| h.is_finished());
-            if ok {
-                break;
-            } else {
-                tries += 1;
-                sleep(Duration::from_millis(1_000)).await;
+        if self.conversation_summaries.is_none() {
+            // wait up to 5 seconds for all unfinished tasks to complete
+            let mut tries = 0;
+            while tries < 5 {
+                let ok = self.join_handles.iter().all(|h| h.is_finished());
+                if ok {
+                    break;
+                } else {
+                    tries += 1;
+                    sleep(Duration::from_millis(1_000)).await;
+                }
             }
+
+            debug!("done waiting on tasks; getting summaries");
+            let mut summaries: Vec<ConversationSummary> = vec![];
+            for (idx, turn) in self.conversation_turns.iter().enumerate() {
+                let bot_side = turn.bot_side.read().await;
+                // TODO: check that we're not sending empty strings or junk.  Perhaps have chatgpt tell
+                // us if what we're sending is worth summarizing???
+                let summary = self
+                    .get_conversation_summary_for_bot_side(idx, &bot_side)
+                    .await;
+                if summary.is_err() {
+                    continue;
+                }
+                let summary = summary.unwrap();
+                debug!(summary=?summary, "summary");
+                summaries.push(summary);
+            }
+            self.conversation_summaries = Some(summaries);
         }
 
-        debug!("done waiting on tasks; getting summaries");
-        let mut summaries: Vec<ConversationSummary> = vec![];
-        for turn in &self.conversation_turns {
-            let bot_side = turn.bot_side.read().await;
-            // TODO: check that we're not sending empty strings or junk.  Perhaps have chatgpt tell
-            // us if what we're sending is worth summarizing???
-            let summary = self.get_conversation_summary_for_bot_side(&bot_side).await;
-            if summary.is_err() {
-                continue;
-            }
-            let summary = summary.unwrap();
-            debug!(summary=?summary, "summary");
-            summaries.push(summary);
-        }
-
-        Ok(summaries)
+        self.conversation_summaries
+            .as_ref()
+            .ok_or(AppError("Failed to access conversation summaries"))
     }
 
     async fn get_conversation_summary_for_bot_side(
         &self,
+        idx: usize,
         bot_side: &str,
     ) -> Result<ConversationSummary, AppError> {
         let url = "https://api.openai.com/v1/chat/completions";
@@ -371,10 +395,176 @@ impl ConversationState {
             resp.choices[0].message.content.to_string()
         };
 
-        Ok(ConversationSummary { topic, summary })
+        Ok(ConversationSummary {
+            idx,
+            topic,
+            summary,
+        })
+    }
+
+    pub async fn insert_db_row(&self) -> Result<(), AppError> {
+        let pool = &self.app_state.db_pool;
+        let caller_phone = self.twilio_connect_payload.from.as_str();
+        let caller = sqlx::query_as!(
+            Caller,
+            "
+            select *
+            from callers
+            where phone = $1
+            ",
+            caller_phone,
+        )
+        .fetch_one(pool)
+        .await;
+        let caller_id = if let Ok(caller) = caller {
+            Ok(caller.id)
+        } else {
+            sqlx::query_as!(
+                Caller,
+                "
+                insert into callers (
+                  phone,
+                  city,
+                  state,
+                  country,
+                  zip
+                ) values (
+                  $1,
+                  $2,
+                  $3,
+                  $4,
+                  $5
+                )
+                returning *
+                ",
+                self.twilio_connect_payload.from,
+                self.twilio_connect_payload.from_city,
+                self.twilio_connect_payload.from_state,
+                self.twilio_connect_payload.from_country,
+                self.twilio_connect_payload.from_zip,
+            )
+            .fetch_one(pool)
+            .await
+            .map_err(|e| {
+                error!(error=%e, "failed to insert caller row");
+                AppError("db error")
+            })
+            .map(|c| c.id)
+        }?;
+
+        if self.dg_request_id.is_none() {
+            return Err(AppError("dg request id unavailable"));
+        }
+        let mut tx = pool.begin().await.map_err(|e| {
+            error!(error=%e, "failed to begin transaction");
+            AppError("db error")
+        })?;
+        let call = sqlx::query_as!(
+            Call,
+            "
+            insert into calls (
+              caller,
+              twilio_call_sid,
+              twilio_stream_sid,
+              dg_request_id
+            )
+            values (
+              $1,
+              $2,
+              $3,
+              $4
+            )
+            returning *
+            ",
+            caller_id,
+            self.twilio_connect_payload.call_sid,
+            self.twilio_stream_id,
+            self.dg_request_id.unwrap(),
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| {
+            error!(error=%e, "failed to insert call row");
+            AppError("db error")
+        })?;
+
+        let call_ids: Vec<i32> = vec![call.id; self.conversation_turns.len()];
+        let call_idxs: Vec<i32> = (0..self.conversation_turns.len())
+            .map(|v| v as i32)
+            .collect();
+        let mut caller_sides: Vec<String> = vec![];
+        for t in &self.conversation_turns {
+            let s = t.caller_side.read().await;
+            caller_sides.push(s.to_string())
+        }
+        let mut bot_sides: Vec<String> = vec![];
+        for t in &self.conversation_turns {
+            let s = t.bot_side.read().await;
+            bot_sides.push(s.to_string())
+        }
+        let topics: Vec<String> = if let Some(conversation_summaries) = &self.conversation_summaries
+        {
+            let mut res: Vec<String> = vec!["".to_string(); self.conversation_turns.len()];
+            for summary in conversation_summaries {
+                res[summary.idx] = summary.topic.to_string();
+            }
+            res
+        } else {
+            vec!["".to_string(); self.conversation_turns.len()]
+        };
+        let summaries: Vec<String> =
+            if let Some(conversation_summaries) = &self.conversation_summaries {
+                let mut res: Vec<String> = vec!["".to_string(); self.conversation_turns.len()];
+                for summary in conversation_summaries {
+                    res[summary.idx] = summary.summary.to_string();
+                }
+                res
+            } else {
+                vec!["".to_string(); self.conversation_turns.len()]
+            };
+        sqlx::query!(
+            "
+            insert into turns (
+              call,
+              call_idx,
+              caller_side,
+              bot_side,
+              topic,
+              summary
+            )
+            select * from unnest (
+              $1::integer[],
+              $2::integer[],
+              $3::text[],
+              $4::text[],
+              $5::text[],
+              $6::text[]
+            )
+            ",
+            &call_ids,
+            &call_idxs,
+            &caller_sides,
+            &bot_sides,
+            &topics,
+            &summaries,
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            error!(error=%e, "failed to batch insert turn rows");
+            AppError("db error")
+        })?;
+
+        tx.commit().await.map_err(|e| {
+            error!(error=%e, "db error");
+            AppError("db error")
+        })?;
+
+        Ok(())
     }
 }
 
+// TODO: move these into `tasks.rs`
 /// Task that is the funnel of all TwilioOutbound messages going to Twilio.
 async fn send_twilio_ws_messages(
     mut twilio_outbound_stream: mpsc::Receiver<TwilioOutbound>,

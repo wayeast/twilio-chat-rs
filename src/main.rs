@@ -1,4 +1,5 @@
 mod conversation_state;
+mod db_types;
 mod deepgram_types;
 mod error;
 mod handlers;
@@ -16,9 +17,11 @@ use axum::{
     routing::{get, post},
     Router,
 };
+use sqlx::postgres::PgPoolOptions;
 use std::collections::HashMap;
 use std::env;
 use std::sync::{Arc, Mutex};
+use tracing::warn;
 use tracing_subscriber::prelude::*;
 
 pub mod consts {
@@ -30,7 +33,9 @@ pub mod consts {
 
 #[tokio::main]
 async fn main() {
-    dotenvy::dotenv().unwrap();
+    if let Err(_) = dotenvy::dotenv() {
+        warn!("No .env file found; app settings must already be set.");
+    }
     let subscriber = tracing_subscriber::registry()
         .with(
             tracing_subscriber::fmt::layer()
@@ -48,11 +53,21 @@ async fn main() {
     let openai_api_key = env::var("OPENAI_API_KEY").expect("OPENAI_API_KEY not set!");
     let twilio_account_sid = env::var("TWILIO_ACCOUNT_SID").expect("TWILIO_ACCOUNT_SID not set!");
     let twilio_auth_token = env::var("TWILIO_AUTH_TOKEN").expect("TWILIO_AUTH_TOKEN not set!");
-    let gcs_credentials = env::var("GOOGLE_APPLICATION_CREDENTIALS")
-        .expect("No google application credentials location set.");
+    let database_url = env::var("DATABASE_URL").expect("DATABASE_URL not set!");
+    let gcs_credentials = include_str!("../chattts-383503-5155ada8252c.json");
+
     let gcs_client = utils::gcs_client(&gcs_credentials).await;
     let http_client = reqwest::Client::new();
     let streams = Arc::new(Mutex::new(HashMap::new()));
+    let db_pool = PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&database_url)
+        .await
+        .expect("Failed to connect to database.");
+    sqlx::migrate!("./migrations")
+        .run(&db_pool)
+        .await
+        .expect("Failed to run db migrations.");
 
     let app_state = Arc::new(AppState {
         console_api_key,
@@ -62,6 +77,7 @@ async fn main() {
         gcs_client,
         http_client,
         streams,
+        db_pool,
     });
 
     let app = Router::new()
