@@ -89,7 +89,10 @@ async fn open_dg_stream(
             http::header::HeaderValue::from_str(&format!("Token {}", app_state.console_api_key))
                 .unwrap(),
         );
-    let (ws_stream, _) = connect_async(rq).await.unwrap();
+    let (ws_stream, _) = connect_async(rq).await.map_err(|e| {
+        error!(error=%e, "error connecting to dg streaming");
+        AppError("DG stream connection error")
+    })?;
     Ok(ws_stream.split())
 }
 
@@ -97,6 +100,7 @@ pub async fn ws_handler(
     ws: WebSocketUpgrade,
     State(app_state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
+    debug!("handling ws connection request");
     ws.on_upgrade(move |socket| socket_handler(socket, app_state))
 }
 
@@ -149,7 +153,7 @@ pub async fn twiml_start_connect(
     State(app_state): State<Arc<AppState>>,
     body: String,
 ) -> impl IntoResponse {
-    trace!(body=%body, "start request body");
+    debug!(body=%body, "start request body");
     let payload = serde_urlencoded::from_str::<TwilioConnectPayload>(&body);
     if let Err(e) = payload {
         error!(error=%e, "failed to deserialize Twilio connect payload");
@@ -169,7 +173,8 @@ pub async fn twiml_start_connect(
         text: APP_GREETING.to_string(),
         ..Default::default()
     };
-    let url = format!("wss://{}/connect", host);
+    let url = format!("wss://{}/chat/connect", host);
+    debug!(url = url, "ws connection");
     let stream_action = StreamAction {
         url,
         track: Some(StreamTrack::Inbound),
@@ -195,7 +200,7 @@ pub async fn twiml_start_connect(
 
 #[allow(dead_code)]
 pub async fn twiml_start_play(Host(host): Host) -> impl IntoResponse {
-    let url = format!("https://{}/play", host);
+    let url = format!("https://{}/chat/play", host);
     let play_action = PlayAction {
         url,
         ..Default::default()

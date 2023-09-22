@@ -21,11 +21,11 @@ use sqlx::postgres::PgPoolOptions;
 use std::collections::HashMap;
 use std::env;
 use std::sync::{Arc, Mutex};
-use tracing::warn;
+use tracing::{debug, warn};
 use tracing_subscriber::prelude::*;
 
 pub mod consts {
-    pub const APP_GREETING: &str = "Hi.  How may I help you?";
+    pub const APP_GREETING: &str = "Hi. How may I help you?";
     pub const ASCII_CLAUSE_ENDINGS: &[&str] = &[".", "?", "!", ";"];
     pub const GOOGLE_WAV_HEADER_SZ: usize = 58;
     pub const POLITENESS_DELAY_MILLIS: u128 = 1_500;
@@ -86,9 +86,11 @@ async fn main() {
         // Choose whether to use a Play verb or Connect verb in start Twiml.
         // .route("/twilio/twiml/start", post(handlers::twiml_start_play))
         .route("/twilio/twiml/start", post(handlers::twiml_start_connect))
-        .route("/", get(|| async { "Hello, World!" }))
+        .route("/hello", get(|| async { "Hello, hello path!" }))
+        .route("/", get(|| async { "Hello, empty path!" }))
         .with_state(app_state);
 
+    debug!("starting application");
     axum::Server::bind(&"0.0.0.0:3000".parse().unwrap())
         .serve(app.into_make_service())
         .await

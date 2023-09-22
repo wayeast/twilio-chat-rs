@@ -1,4 +1,4 @@
-FROM clux/muslrust:1.69.0 AS builder
+FROM clux/muslrust:1.70.0 AS builder
 
 WORKDIR /build
 COPY . .
